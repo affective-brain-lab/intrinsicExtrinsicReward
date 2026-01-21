@@ -1,0 +1,694 @@
+---
+title: "Intrinsic and Extrinsic Dimensions | Behavioral Analysis"
+author: "India Pinhorn"
+---
+
+**Data and output paths**
+```{r}
+# ---- Paths ---------------------------------------------------
+data_dir   <- "data"
+output_dir <- "outputs"
+set.seed(1234)
+```
+
+**Load packages**
+```{r}
+# ---- Packages ------------------------------------------------
+library(dplyr)
+library(tidyr)
+library(psych)
+library(paran)
+library(lme4)
+library(lmerTest)
+library(whitening)
+library(purrr)
+library(readxl)
+library(openxlsx)
+library(knitr)
+```
+
+**Load Data** 
+```{r}
+# ---- Experiment 1 --------------------------------------------
+ratingData_exp1 <- read.xlsx(file.path(data_dir, "ratingData_exp1.xlsx"))
+choiceData_exp1 <- read.xlsx(file.path(data_dir, "choiceData_exp1.xlsx"))
+
+# ---- Experiment 2 --------------------------------------------
+ratingData_exp2 <- read.xlsx(file.path(data_dir, "ratingData_onstetOrder_exp2.xlsx"))
+choiceData_exp2 <- read.xlsx(file.path(data_dir, "choiceData_exp2.xlsx"))
+
+# ---- Stimulus Features --------------------------------------------
+imageFeatures <- read_excel(file.path(data_dir, "imageFeatures.xlsx"))
+sentenceFeatures <- read_excel(file.path(data_dir, "sentenceFeatures.xlsx"))
+
+```
+
+**Helper functions**
+```{r}
+# ---- Cumulative scree ------------------------------
+run_cumulative_scree <- function(df, vars, title) {
+  pca <- principal(df[, vars], nfactors = length(vars), rotate = "none")
+  cum_var <- pca$Vaccounted["Cumulative Var", ]
+  
+  plot(cum_var, type = "o", ylim = c(0, 1),
+       xlab = "Number of Components",
+       ylab = "Cumulative Variance Explained",
+       main = title)
+  abline(h = 0.80, lty = 2)
+}
+
+# ---- ZCA whitening ------------------------------
+whiten_block <- function(df, score_vars) {
+  X <- scale(df[, score_vars], center = TRUE, scale = FALSE)
+  X_white <- whitening::whiten(X, method = "ZCA", center = TRUE)
+  out <- as.data.frame(X_white)
+  names(out) <- paste0(score_vars, "_zca")
+  bind_cols(df, out)
+}
+
+# ---- Project global ------------------------------
+project_into_global <- function(X, pca_obj, suffix) {
+  X <- scale(X, center = TRUE, scale = FALSE)
+  scores <- as.matrix(X) %*% pca_obj$weights
+  out <- as.data.frame(scores)
+  colnames(out) <- paste0(c("Intrinsic_", "Extrinsic_", "Familiar_"), suffix)
+  out
+}
+
+# ---- Add PCA scores to choice data  ------------------------------
+process_participants_choice <- function(dataChoice, dataPCA, columns_to_add) {
+  vars <- setdiff(columns_to_add, c("participant", "Disp"))
+  
+  for (v in vars) {
+    dataChoice[[paste0(v, "_left")]]  <- NA
+    dataChoice[[paste0(v, "_right")]] <- NA
+  }
+  
+  dataChoice <- dataChoice %>%
+    left_join(dataPCA %>% dplyr::select(all_of(columns_to_add)),
+              by = c("participant", "rightDisp" = "Disp"))
+  
+  for (v in vars) {
+    dataChoice[[paste0(v, "_right")]] <- coalesce(dataChoice[[paste0(v, "_right")]],
+                                                 dataChoice[[v]])
+  }
+  
+  dataChoice <- dataChoice %>% dplyr::select(-all_of(vars))
+  
+  dataChoice <- dataChoice %>%
+    left_join(dataPCA %>% dplyr::select(all_of(columns_to_add)),
+              by = c("participant", "leftDisp" = "Disp"))
+  
+  for (v in vars) {
+    dataChoice[[paste0(v, "_left")]] <- coalesce(dataChoice[[paste0(v, "_left")]],
+                                                dataChoice[[v]])
+  }
+  
+  dataChoice <- dataChoice %>% dplyr::select(-all_of(vars))
+  
+  for (v in vars) {
+    dataChoice[[paste0("diff_", v)]] <-
+      dataChoice[[paste0(v, "_left")]] - dataChoice[[paste0(v, "_right")]]
+  }
+  
+  dataChoice
+}
+```
+
+**Experiment 1**
+
+**Remove catch trials (Exp 1)**
+```{r}
+ratingData_exp1 <- ratingData_exp1 %>%
+  filter(catchTrials != "incorrect")
+```
+
+**Select rating variables (interesting, useful, familiar, beautiful, meaningful) (Exp 1)**
+```{r}
+rating_vars <- names(ratingData_exp1)[8:12]
+```
+
+**Select minimum no. of components needed to preserve 80% of explained varaince (Exp 1)**
+```{r}
+run_cumulative_scree(filter(ratingData_exp1, Cond == 1), rating_vars, "Exp 1 – Visual Art")
+run_cumulative_scree(filter(ratingData_exp1, Cond == 2), rating_vars, "Exp 1 – Semantic Information")
+run_cumulative_scree(filter(ratingData_exp1, Cond == 3), rating_vars, "Exp 1 – Material Goods")
+```
+
+**Estimate PCA and interpret loadings (Exp 1)**
+```{r}
+# ---- Fit PCA (Exp 1) ------------------------------
+
+fit_pca <- function(df, vars) {
+  principal(df[, vars], nfactors = 3, rotate = "varimax")
+}
+
+pca_exp1 <- list(
+  vis  = fit_pca(filter(ratingData_exp1, Cond == 1), rating_vars),
+  info = fit_pca(filter(ratingData_exp1, Cond == 2), rating_vars),
+  mat  = fit_pca(filter(ratingData_exp1, Cond == 3), rating_vars)
+)
+
+# ---- Interpret Loadings PCA (Exp 1) ------------------------------
+
+extract_loadings <- function(pca_obj) {
+  load <- as.data.frame(unclass(pca_obj$loadings))
+  load <- load[, seq_len(3)]
+  colnames(load) <- c("Intrinsic", "Extrinsic", "Familiar")
+  round(load, 2)
+}
+
+extract_loadings(pca_exp1$vis)
+extract_loadings(pca_exp1$info)
+extract_loadings(pca_exp1$mat)
+```
+
+**Projection of PCA scores & Whitening (Exp 1)**
+Participant-level rating vectors were projected into the previously estimated PCA solution by multiplying centered rating data with the fixed component loading matrix. This yielded component scores for each participant and condition that were expressed in a common latent space.
+```{r}
+# ---- Project PCA scores and apply ZCA whitening (Exp 1) --------
+
+pcaData_exp1 <- ratingData_exp1 %>%
+  group_by(participant, Cond) %>%
+  group_modify(~ {
+
+    # Extract rating matrix for this participant × condition
+    X <- .x[, rating_vars]
+
+    # Project ratings into the appropriate PCA space
+    scores_raw <- if (.y$Cond == 1) {
+      project_into_global(X, pca_exp1$vis,  "pca_vis")
+    } else if (.y$Cond == 2) {
+      project_into_global(X, pca_exp1$info, "pca_info")
+    } else if (.y$Cond == 3) {
+      project_into_global(X, pca_exp1$mat,  "pca_mat")
+    } else {
+      stop("Unexpected condition")
+    }
+
+    df_with_scores <- bind_cols(.x, scores_raw)
+
+    # ZCA-whiten PCA scores within condition
+    score_vars <- if (.y$Cond == 1) {
+      c("Intrinsic_pca_vis", "Extrinsic_pca_vis", "Familiar_pca_vis")
+    } else if (.y$Cond == 2) {
+      c("Intrinsic_pca_info", "Extrinsic_pca_info", "Familiar_pca_info")
+    } else {
+      c("Intrinsic_pca_mat", "Extrinsic_pca_mat", "Familiar_pca_mat")
+    }
+
+    whiten_block(df_with_scores, score_vars)
+  }) %>%
+  ungroup()
+
+# ---- Collapse condition-specific PCA columns (Exp 1) ------------------
+
+pcaData_exp1 <- pcaData_exp1 %>%
+  mutate(
+    Intrinsic_pca = case_when(
+      Cond == 1 ~ Intrinsic_pca_vis,
+      Cond == 2 ~ Intrinsic_pca_info,
+      Cond == 3 ~ Intrinsic_pca_mat
+    ),
+    Extrinsic_pca = case_when(
+      Cond == 1 ~ Extrinsic_pca_vis,
+      Cond == 2 ~ Extrinsic_pca_info,
+      Cond == 3 ~ Extrinsic_pca_mat
+    ),
+    Familiar_pca = case_when(
+      Cond == 1 ~ Familiar_pca_vis,
+      Cond == 2 ~ Familiar_pca_info,
+      Cond == 3 ~ Familiar_pca_mat
+    ),
+    Intrinsic_pca_zca = case_when(
+      Cond == 1 ~ Intrinsic_pca_vis_zca,
+      Cond == 2 ~ Intrinsic_pca_info_zca,
+      Cond == 3 ~ Intrinsic_pca_mat_zca
+    ),
+    Extrinsic_pca_zca = case_when(
+      Cond == 1 ~ Extrinsic_pca_vis_zca,
+      Cond == 2 ~ Extrinsic_pca_info_zca,
+      Cond == 3 ~ Extrinsic_pca_mat_zca
+    ),
+    Familiar_pca_zca = case_when(
+      Cond == 1 ~ Familiar_pca_vis_zca,
+      Cond == 2 ~ Familiar_pca_info_zca,
+      Cond == 3 ~ Familiar_pca_mat_zca
+    )
+  ) %>%
+  dplyr::select(
+    -dplyr::matches("pca_vis"),
+    -dplyr::matches("pca_info"),
+    -dplyr::matches("pca_mat")
+  )
+
+```
+
+
+**Linear mixed-effects models predicting liking (Exp 1)**
+Fit linear mixed-effects models predicting liking from PCA-derived reward dimensions.
+```{r}
+# ---- Prepare data for liking models (Exp 1) ---------------------------
+
+predictors <- c(
+  "Intrinsic_pca_zca",
+  "Extrinsic_pca_zca",
+  "Familiar_pca_zca",
+  "age",
+  "edu"
+)
+
+standardize_for_liking <- function(df) {
+  df %>%
+    mutate(
+      liking = as.numeric(scale(liking)),
+      age    = as.numeric(scale(age)),
+      across(any_of(predictors), ~ as.numeric(scale(.x)))
+    )
+}
+
+pcaData_exp1_vis_std  <- pcaData_exp1 %>% filter(Cond == 1) %>% standardize_for_liking()
+pcaData_exp1_info_std <- pcaData_exp1 %>% filter(Cond == 2) %>% standardize_for_liking()
+pcaData_exp1_mat_std  <- pcaData_exp1 %>% filter(Cond == 3) %>% standardize_for_liking()
+
+# ---- Liking mixed-effects models (Exp 1) ------------------------------
+
+form_liking <-
+  liking ~ Intrinsic_pca_zca + Extrinsic_pca_zca + Familiar_pca_zca +
+    (1 + Intrinsic_pca_zca + Extrinsic_pca_zca + Familiar_pca_zca | participant)
+
+fit_liking_model <- function(df) {
+  lmer(
+    form_liking,
+    data = df,
+    control = lmerControl(
+      optimizer = "bobyqa",
+      optCtrl = list(maxfun = 2e5)
+    )
+  )
+}
+
+summary(fit_liking_model(pcaData_exp1_vis_std))
+summary(fit_liking_model(pcaData_exp1_info_std))
+summary(fit_liking_model(pcaData_exp1_mat_std))
+```
+
+**Choice data with PCA scores (Exp 1)**
+Merge PCA-derived variables into choice trials and compute within-trial difference score
+```{r}
+# ---- Merge PCA scores into choice data (Exp 1) ------------------------
+
+columns_to_add <- c(
+  "participant", "Disp",
+  "interesting", "useful", "familiar",
+  "beautiful", "meaningful", "liking",
+  "Intrinsic_pca_zca", "Extrinsic_pca_zca", "Familiar_pca_zca"
+)
+
+choicePCAData_exp1 <- process_participants_choice(
+  choiceData_exp1,
+  pcaData_exp1,
+  columns_to_add
+)
+```
+
+**Logistic mixed-effects models predicting choice (Exp 1)**
+Fit logistic mixed-effects models predicting choice from PCA-derived reward dimensions.
+```{r}
+# ---- Prepare data for choice models (Exp 1) ---------------------------
+
+choice_predictors <- c(
+  "diff_Intrinsic_pca_zca",
+  "diff_Extrinsic_pca_zca",
+  "diff_Familiar_pca_zca",
+  "age",
+  "edu"
+)
+
+standardize_for_choice <- function(df) {
+  df %>%
+    mutate(
+      age = as.numeric(as.character(age)),
+      edu = as.numeric(as.character(edu)),
+      across(any_of(choice_predictors), ~ as.numeric(scale(.x))),
+      leftChoice = as.factor(leftChoice)
+    )
+}
+
+choicePCAData_exp1_vis_std  <- choicePCAData_exp1 %>% filter(choiceCond == 1) %>% standardize_for_choice()
+choicePCAData_exp1_info_std <- choicePCAData_exp1 %>% filter(choiceCond == 2) %>% standardize_for_choice()
+choicePCAData_exp1_mat_std  <- choicePCAData_exp1 %>% filter(choiceCond == 3) %>% standardize_for_choice()
+
+# ---- Choice mixed-effects models (Exp 1) ------------------------------
+
+form_choice <-
+  leftChoice ~
+    diff_Intrinsic_pca_zca +
+    diff_Extrinsic_pca_zca +
+    diff_Familiar_pca_zca +
+    (1 + diff_Intrinsic_pca_zca +
+         diff_Extrinsic_pca_zca +
+         diff_Familiar_pca_zca | participant)
+
+fit_choice_model <- function(df) {
+  glmer(
+    form_choice,
+    data = df,
+    family = binomial(link = "logit"),
+    control = glmerControl(
+      optimizer = "bobyqa",
+      optCtrl = list(maxfun = 2e5)
+    )
+  )
+}
+
+summary(fit_choice_model(choicePCAData_exp1_vis_std))
+summary(fit_choice_model(choicePCAData_exp1_info_std))
+summary(fit_choice_model(choicePCAData_exp1_mat_std))
+```
+
+**Export PCA liking and choice data (Exp 1)**
+```{r}
+write_xlsx(pcaData_exp1,file.path(output_dir, "ratingPCAData_exp1"))
+write_xlsx(choicePCAData_exp1,file.path(output_dir, "choicePCAData_exp1"))
+```
+
+
+**Experiment 2**
+
+**Select rating variables (interesting, useful, familiar, beautiful, meaningful) (Exp 2)**
+```{r}
+rating_vars <- names(ratingData_exp2)[7:11]
+```
+
+**Select minimum no. of components needed to preserve 80% of explained variance (Exp 2)**
+```{r}
+run_cumulative_scree(filter(ratingData_exp2, Cond == 1), rating_vars, "Exp 2 – Visual Art")
+run_cumulative_scree(filter(ratingData_exp2, Cond == 2), rating_vars, "Exp 2 – Semantic Information")
+```
+
+**Estimate PCA and interpret loadings (Exp 2)**
+```{r}
+
+# ---- Run PCA (Exp 2) --------
+
+fit_pca <- function(df, vars) {
+  principal(df[, vars], nfactors = 3, rotate = "varimax")
+}
+
+pca_exp2 <- list(
+  vis  = fit_pca(filter(ratingData_exp2, Cond == 1), rating_vars),
+  info = fit_pca(filter(ratingData_exp2, Cond == 2), rating_vars)
+)
+
+# ---- Interpret PCA loadings (Exp 2) --------
+
+extract_loadings <- function(pca_obj) {
+  load <- as.data.frame(unclass(pca_obj$loadings))
+  load <- load[, seq_len(3)]
+  colnames(load) <- c("Intrinsic", "Extrinsic", "Familiar")
+  round(load, 2)
+}
+
+
+extract_loadings(pca_exp2$vis)
+extract_loadings(pca_exp2$info)
+
+```
+
+**Projection of PCA scores & Whitening (Exp 2)**
+Participant-level rating vectors were projected into the previously estimated PCA solution by multiplying centered rating data with the fixed component loading matrix. This yielded component scores for each participant and condition that were expressed in a common latent space.
+```{r}
+# ---- Project PCA scores and apply ZCA whitening (Exp 2) --------
+
+pcaData_exp2 <- ratingData_exp2 %>%
+  group_by(participant, Cond) %>%
+  group_modify(~ {
+
+    X <- .x[, rating_vars]
+
+    scores_raw <- if (.y$Cond == 1) {
+      project_into_global(X, pca_exp2$vis,  "pca_vis")
+    } else if (.y$Cond == 2) {
+      project_into_global(X, pca_exp2$info, "pca_info")
+    } else {
+      stop("Unexpected condition")
+    }
+
+    df_with_scores <- bind_cols(.x, scores_raw)
+
+    score_vars <- if (.y$Cond == 1) {
+      c("Intrinsic_pca_vis", "Extrinsic_pca_vis", "Familiar_pca_vis")
+    } else {
+      c("Intrinsic_pca_info", "Extrinsic_pca_info", "Familiar_pca_info")
+    }
+
+    whiten_block(df_with_scores, score_vars)
+  }) %>%
+  ungroup()
+
+
+# ---- Collapse condition-specific PCA columns (Exp 2) ------------------
+
+pcaData_exp2 <- pcaData_exp2 %>%
+  mutate(
+    Intrinsic_pca = ifelse(Cond == 1, Intrinsic_pca_vis, Intrinsic_pca_info),
+    Extrinsic_pca = ifelse(Cond == 1, Extrinsic_pca_vis, Extrinsic_pca_info),
+    Familiar_pca  = ifelse(Cond == 1, Familiar_pca_vis,  Familiar_pca_info),
+
+    Intrinsic_pca_zca = ifelse(Cond == 1, Intrinsic_pca_vis_zca, Intrinsic_pca_info_zca),
+    Extrinsic_pca_zca = ifelse(Cond == 1, Extrinsic_pca_vis_zca, Extrinsic_pca_info_zca),
+    Familiar_pca_zca  = ifelse(Cond == 1, Familiar_pca_vis_zca,  Familiar_pca_info_zca)
+  ) %>%
+  dplyr::select(
+    -dplyr::matches("pca_vis"),
+    -dplyr::matches("pca_info")
+  )
+
+
+```
+
+**Linear mixed-effects models predicting liking (Exp 2)**
+Fit linear mixed-effects models predicting liking from PCA-derived reward dimensions.
+```{r}
+# ---- Prepare data for liking models (Exp 2) ---------------------------
+
+predictors <- c(
+  "Intrinsic_pca_zca",
+  "Extrinsic_pca_zca",
+  "Familiar_pca_zca",
+  "age",
+  "edu"
+)
+
+standardize_for_liking <- function(df) {
+  df %>%
+    mutate(
+      liking = as.numeric(scale(liking)),
+      age    = as.numeric(scale(age)),
+      across(any_of(predictors), ~ as.numeric(scale(.x)))
+    )
+}
+
+pcaData_exp2_vis_std  <- pcaData_exp2 %>% filter(Cond == 1) %>% standardize_for_liking()
+pcaData_exp2_info_std <- pcaData_exp2 %>% filter(Cond == 2) %>% standardize_for_liking()
+
+# ---- Liking mixed-effects models (Exp 2) ------------------------------
+
+form_liking <-
+  liking ~ Intrinsic_pca_zca + Extrinsic_pca_zca + Familiar_pca_zca +
+    (1 + Intrinsic_pca_zca + Extrinsic_pca_zca + Familiar_pca_zca | participant)
+
+fit_liking_model <- function(df) {
+  lmer(
+    form_liking,
+    data = df,
+    control = lmerControl(
+      optimizer = "bobyqa",
+      optCtrl = list(maxfun = 2e5)
+    )
+  )
+}
+
+summary(fit_liking_model(pcaData_exp2_vis_std))
+summary(fit_liking_model(pcaData_exp2_info_std))
+
+```
+
+**Choice data with PCA scores (Exp 2)**
+Merge PCA-derived variables into choice trials and compute within-trial difference score
+```{r}
+# ---- Merge PCA scores into choice data (Exp 2) ------------------------
+
+columns_to_add <- c(
+  "participant", "Disp",
+  "interesting", "useful", "familiar",
+  "beautiful", "meaningful", "liking",
+  "Intrinsic_pca_zca", "Extrinsic_pca_zca", "Familiar_pca_zca"
+)
+
+choicePCAData_exp2 <- process_participants_choice(
+  choiceData_exp2,
+  pcaData_exp2,
+  columns_to_add
+)
+
+```
+
+**Logistic mixed-effects models predicting choice (Exp 2)**
+Fit logistic mixed-effects models predicting choice from PCA-derived reward dimensions.
+```{r}
+# ---- Prepare data for choice models (Exp 2) ---------------------------
+
+choice_predictors <- c(
+  "diff_Intrinsic_pca_zca",
+  "diff_Extrinsic_pca_zca",
+  "diff_Familiar_pca_zca",
+  "age",
+  "edu"
+)
+
+standardize_for_choice <- function(df) {
+  df %>%
+    mutate(
+      age = as.numeric(as.character(age)),
+      edu = as.numeric(as.character(edu)),
+      across(any_of(choice_predictors), ~ as.numeric(scale(.x))),
+      leftChoice = as.factor(leftChoice)
+    )
+}
+
+
+choicePCAData_exp2_vis_std  <- choicePCAData_exp2 %>% filter(choiceCond == 1) %>% standardize_for_choice()
+
+choicePCAData_exp2_info_std <- choicePCAData_exp2 %>% filter(choiceCond == 2) %>% standardize_for_choice()
+
+# ---- Choice mixed-effects models (Exp 2) ------------------------------
+
+form_choice <-
+  leftChoice ~
+    diff_Intrinsic_pca_zca +
+    diff_Extrinsic_pca_zca +
+    diff_Familiar_pca_zca +
+    (1 + diff_Intrinsic_pca_zca +
+         diff_Extrinsic_pca_zca +
+         diff_Familiar_pca_zca | participant)
+
+fit_choice_model <- function(df) {
+  glmer(
+    form_choice,
+    data = df,
+    family = binomial(link = "logit"),
+    control = glmerControl(
+      optimizer = "bobyqa",
+      optCtrl = list(maxfun = 2e5)
+    )
+  )
+}
+
+summary(fit_choice_model(choicePCAData_exp2_vis_std))
+summary(fit_choice_model(choicePCAData_exp2_info_std))
+```
+
+**Export PCA liking and choice data (Exp 2)**
+```{r}
+write_xlsx(pcaData_exp2,file.path(output_dir, "ratingPCAData_exp2"))
+write_xlsx(choicePCAData_exp2,file.path(output_dir, "choicePCAData_exp2"))
+```
+
+
+**Low-level feature PCAs for fMRI control GLM 2 (Exp 2)**
+Dimensionality reduction of low-level stimulus features to obtain the minimum orthogonal control dimensions needed
+```{r}
+extract_loadings <- function(pca_obj) {
+  load <- as.data.frame(unclass(pca_obj$loadings))
+  round(load, 2)
+}
+
+# ---- Visual Art feature PCA --------------------------------------
+# Visual feature variables
+vis_feature_vars <- c(
+  "log_luminance",
+  "local_contrast",
+  "hue",
+  "edges",
+  "salience",
+  "human",
+  "abstract",
+  "social",
+  "face"
+)
+
+# Standardize features 
+X_vis <- scale(imageFeatures[, vis_feature_vars])
+
+# Parallel analysis to determine minimum number of components
+paran(X_vis, iterations = 1000)
+
+# PCA with varimax rotation 
+pca_vis_features <- principal(
+  X_vis,
+  nfactors = 2,
+  rotate = "varimax",
+  covar = FALSE
+)
+
+extract_loadings(pca_vis_features)
+
+# Extract component scores
+vis_pca_scores <- as.data.frame(pca_vis_features$scores)
+colnames(vis_pca_scores) <- c("Visual_PCA1", "Visual_PCA2")
+
+# Append PCA scores to original dataframe
+imageFeatures_with_scores <- bind_cols(
+  imageFeatures,
+  vis_pca_scores
+)
+
+
+# ---- Semantic Information feature PCA --------------------
+
+# Informational feature variables
+info_feature_vars <- c(
+  "negLogProb",
+  "positive",
+  "negative",
+  "syllables",
+  "words",
+  "actVerb"
+)
+
+# Standardize features prior to PCA
+X_info <- scale(sentenceFeatures[, info_feature_vars])
+
+# Parallel analysis to determine minimum number of components
+paran(X_info, iterations = 1000)
+
+# PCA with varimax rotation 
+pca_info_features <- principal(
+  X_info,
+  nfactors = 2,
+  rotate = "varimax",
+  covar = FALSE
+)
+
+
+extract_loadings(pca_info_features)
+
+# Extract component scores
+info_pca_scores <- as.data.frame(pca_info_features$scores)
+colnames(info_pca_scores) <- c("Info_PCA1", "Info_PCA2")
+
+# Append PCA scores to original dataframe
+info_Controls_GPTXL_with_scores <- bind_cols(
+  imageFeatures,
+  info_pca_scores
+)
+
+```
+
+**Export low-level feature PCA scores (Exp 2)**
+```{r}
+write_xlsx(imageFeatures_with_scores,file.path(data_dir, "vis_Controls_withPCA2.xlsx"))
+write_xlsx(info_Controls_GPTXL_with_scores,file.path(data_dir, "info_Controls_GPTXL_withPCA2.xlsx"))
+```
